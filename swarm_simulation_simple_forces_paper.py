@@ -14,7 +14,7 @@ import numpy as np
 
 # Fenster- und Raumparameter
 WIDTH, HEIGHT = 150, 1000
-NUM_ANIMALS = 500
+NUM_ANIMALS = 700
 
 # Simulationsparameter
 dt = 0.05         # Zeitschritt (s)
@@ -24,13 +24,18 @@ radius = 5        # Tier-Radius (Pixel)
 # Parameter für lokale Interaktionskräfte
 repulsion_range = 20    # Bereich, in dem repulsive Kräfte wirken
 attraction_range = 100  # Bereich, in dem attractive Kräfte wirken
-K_rep = 0.0           # Konstante für repulsive Kraft
+
+# Repulsive Kraft: vor der Panik abgeschaltet, nach der Panik stark
+K_rep_prepanic = 0.0           # Konstante für repulsive Kraft
+K_rep_panic = 100.0           # Konstante für repulsive Kraft
 
 # Attractive Kraft: vor der Panik stark, nach der Panik abgeschaltet
-K_attr_prepanic = 300.0
+K_attr_prepanic = 0.0
 K_attr_panic = 100.0
 
-k_coll = 0.0          # Federkonstante für Kollisionskraft
+# Kollisionskraft: vor der Panik abgeschaltet, nach der Panik stark
+k_coll_prepanic = 0.0          # Federkonstante für Kollisionskraft
+k_coll_panic = 100.0          # Federkonstante für Kollisionskraft
 
 # PANIK-Parameter
 PANIC_CLICK_RADIUS = 100.0  # Radius um den Klickpunkt, in dem Panik ausgelöst wird
@@ -49,12 +54,35 @@ MAX_FORCE = 50.0
 
 EPS = 1e-6
 
-# Initialisierung: Tiere werden gleichverteilt im Raum platziert
-pos = np.random.uniform([radius, radius], [WIDTH - radius, HEIGHT - radius], (NUM_ANIMALS, 2))
+# # Initialisierung: Tiere werden gleichverteilt im Raum platziert
+# pos = np.random.uniform([radius, radius], [WIDTH - radius, HEIGHT - radius], (NUM_ANIMALS, 2))
+# vel = np.zeros((NUM_ANIMALS, 2))
+# acc = np.zeros((NUM_ANIMALS, 2))
+# panicked = np.zeros(NUM_ANIMALS, dtype=bool)
+# panic_origin = np.zeros((NUM_ANIMALS, 2))  # Wird bei Panik gesetzt
+
+# ----- Initiale Verteilung in Clustern (Gruppen) -----
+NUM_CLUSTERS = 100
+animals_per_cluster = NUM_ANIMALS // NUM_CLUSTERS
+pos = np.zeros((NUM_ANIMALS, 2))
 vel = np.zeros((NUM_ANIMALS, 2))
 acc = np.zeros((NUM_ANIMALS, 2))
 panicked = np.zeros(NUM_ANIMALS, dtype=bool)
 panic_origin = np.zeros((NUM_ANIMALS, 2))  # Wird bei Panik gesetzt
+# Definiere einen Sicherheitsabstand von den Wänden (z.B. 20 Pixel)
+margin = 20
+for cl in range(NUM_CLUSTERS):
+    # Wähle eine zufällige Cluster-Mitte im inneren Bereich
+    center = np.random.uniform([margin, margin], [WIDTH - margin, HEIGHT - margin])
+    idx_start = cl * animals_per_cluster
+    idx_end = (cl + 1) * animals_per_cluster
+    # Verteile die Tiere innerhalb eines kleinen Bereichs um die Cluster-Mitte (Normalverteilung)
+    pos[idx_start:idx_end] = np.random.normal(loc=center, scale=20, size=(animals_per_cluster, 2))
+# Falls es Reste gibt, verteile sie gleichmäßig
+if NUM_ANIMALS % NUM_CLUSTERS != 0:
+    pos[-(NUM_ANIMALS % NUM_CLUSTERS):] = np.random.uniform([margin, margin], [WIDTH - margin, HEIGHT - margin], (NUM_ANIMALS % NUM_CLUSTERS, 2))
+
+
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -93,9 +121,10 @@ while running:
     e = diff / d_safe[:, :, None]
 
     rep_mask = d < repulsion_range
+    K_rep_effective = np.where(panicked[:, None], K_rep_panic, K_rep_prepanic)
     F_rep = np.where(rep_mask[:, :, None],
-                     K_rep * (repulsion_range - d_safe)[:, :, None] / (d_safe**2)[:, :, None] * (-e),
-                     0)
+                   K_rep_effective * (repulsion_range - d_safe)[:, :, None] / (d_safe**2)[:, :, None] * (-e),
+                   0)
 
     attr_mask = (d < attraction_range) & (d >= repulsion_range)
     K_attr_array = np.where(panicked, K_attr_panic, K_attr_prepanic)
@@ -104,9 +133,10 @@ while running:
                       0)
 
     coll_mask = d < (2 * radius)
+    K_coll_effective = np.where(panicked[:, None], k_coll_panic, k_coll_prepanic)
     F_coll = np.where(coll_mask[:, :, None],
-                      k_coll * ((2 * radius - d_safe))[:, :, None] * (-e),
-                      0)
+                  K_coll_effective * ((2 * radius - d_safe))[:, :, None] * (-e),
+                  0)
 
     F_int = np.sum(F_rep + F_attr + F_coll, axis=1)
     F_rand = np.random.uniform(-1, 1, (NUM_ANIMALS, 2))
@@ -152,8 +182,8 @@ while running:
     pos += vel * dt
 
     # --- Sicherstellen, dass Tiere im Stall bleiben ---
-    pos[:, 0] = np.clip(pos[:, 0], radius, WIDTH - radius)
-    pos[:, 1] = np.clip(pos[:, 1], radius, HEIGHT - radius)
+    pos[:, 0] = np.clip(pos[:, 0], radius, WIDTH - radius)      # debug
+    pos[:, 1] = np.clip(pos[:, 1], radius, HEIGHT - radius)     # debug
 
     speeds = np.linalg.norm(vel, axis=1)
     max_speed = np.where(panicked, MAX_SPEED_PANIC, MAX_SPEED_PREPANIC)
