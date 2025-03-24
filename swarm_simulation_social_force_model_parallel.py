@@ -1,0 +1,594 @@
+# ToDo's
+# - Erl.: start condition: starting velocity is uniform which moves the animals all to the borders
+# - Erl.: flee force: the flee force is not working properly. flee force is very fast the only active force.
+# - Erl.: position of one aninmal is independent of the others: animals can be on the same position
+# - Erl.: Panic status not working properly: Panic status is not being updated properly. It is not being updated when the panic source is removed.
+# - Erl.: Random force: approach to include the random force without adding it in every iteration. Just add it once in the beginning and adjust it radnomly so the movement can switch to other directions and veloctities abruptly.
+# - video of animals for different force paramerters and threee different panic positions
+# - Add repulsion and attraction force since beginning but with less intensity if animal is not in panic
+# - Add characteristics of the animals: leaders, followers, stupid, smart, etc.
+# - Add random force at the beginning to all animals so that an animal can move and after some iteration stand still in a group
+# - Increase randomness to some animals so that they can suprisingly move in another different direction
+# - Add third dimension to the simulation: Jumping/flying and stapling animals
+
+
+import pygame
+import random
+import math
+import numpy as np
+from numba import cuda, int32
+import tkinter as tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+import threading
+import sys
+
+# ------------------ Globale Terminierung ------------------
+terminate_event = threading.Event()
+
+# ------------------ Parameter der Simulation ------------------
+NUM_ANIMALS = 700  # Gesamtanzahl der Tiere
+NUM_CLUSTERS = 500  # Anzahl der anfänglichen Gruppen
+WIDTH, HEIGHT = 150, 1000  # [dm]
+ANIMAL_RADIUS = 5  # Darstellungsradius [dm]
+PANIC_CLICK_RADIUS = 100.0  # Radius, in dem ein Mausklick Panik auslöst [dm]
+PANIC_TRANSMISSION_DIST = 10.0  # Abstand, in dem Panik übertragen wird [dm]
+MAX_SPEED = 0.4  # Maximale Geschwindigkeit der Tiere [dm/s]
+MAX_FORCE = 15.0  # Maximale Kraft, die auf ein Tier wirken darf [kgm/s^2]
+REPULSION_DIST = 5.0  # Mindestabstand, um Überlappungen zu vermeiden [dm]
+REPULSION_FORCE = 1.0  # Stärke der Abstoßungskraft [kgm/s^2]
+ATTRACT_DIST = 20.0  # Bereich, in dem attractive Kräfte wirken
+ATTRACT_FORCE = 1.0  # Anziehende Kraft für Gruppenbildung [kgm/s^2]
+FLEE_FORCE = 5.0  # Fluchtkraft von der Panikquelle [kgm/s^2]
+RANDOM_FORCE = 3  # Zufällige Kraft, die immer wirkt [kgm/s^2]
+
+# Parameter für die Gruppenbildung beim Start
+CLUSTER_SPREAD = 30  # Streuung der Tiere um das Gruppenzentrum
+MARGIN = 5  # Abstand zum Fensterrand
+
+# Aktuelle Messwerte
+current_info = {
+    "panic_ratio": 0.0,
+    "panic_count": 0,
+    "force": 0.0,
+    "force_rand": 0.0,
+    "force_att": 0.0,
+    "force_rep": 0.0,
+    "force_flee": 0.0,
+}
+
+
+# ------------- Globale Daten für die zeitlichen Positionen der Tiere -------------
+data_pos = []  # Positionen der Tiere
+
+# ------------- Globale Daten für den Plot -------------
+data_x = []  # Simulationszeit (in s)
+data_y_panic = []  # Panikverhältnis (Anteil panischer Tiere)
+data_force_rand = []  # Zufallskraft
+data_force_rep = []  # Abstoßungskraft
+data_force_att = []  # Anziehungskraft
+data_force_flee = []  # Fluchtkraft
+data_force = []  # Durchschnittliche Nettokraft
+
+
+# ------------------ GPU Kernel: Update der Tiere ------------------
+@cuda.jit
+def update_animals_kernel(
+    pos_x,
+    pos_y,
+    vel_x,
+    vel_y,
+    in_movement,
+    bool_in_movement,
+    panicked,
+    panic_origin,
+    n,
+    panic_mode,
+    random_generator_x,
+    random_generator_y,
+    forces,
+    forces_random,
+    forces_att,
+    forces_rep,
+    forces_flee,
+):
+    i = cuda.grid(1)
+
+    forces[i] = 0.0
+    forces_rep[i] = 0.0
+    forces_att[i] = 0.0
+    forces_random[i] = 0.0
+    forces_flee[i] = 0.0
+
+    if i < n:
+        force_x = 0.0
+        force_y = 0.0
+
+        # Im normalen Modus: Berechne teure Interaktionen (nur wenn panisch und normaler Modus)
+        if panicked[i] == 1:
+            for j in range(n):
+                if j == i:
+                    continue
+                dx = pos_x[i] - pos_x[j]
+                dy = pos_y[i] - pos_y[j]
+                d_sq = dx * dx + dy * dy
+                if d_sq > 0.0 and d_sq < 100.0 * 100.0:
+                    d = math.sqrt(d_sq)
+                    # Abstoßung bei zu geringer Distanz
+                    if d_sq < REPULSION_DIST * REPULSION_DIST:
+                        factor = (REPULSION_DIST - d) * REPULSION_FORCE / d
+                        f_rep_x = dx * factor
+                        f_rep_y = dy * factor
+                        force_x += f_rep_x
+                        force_y += f_rep_y
+                        # Speichere die repulsiven Kräfte für dieses Tier
+                        forces_rep[i] = math.sqrt(f_rep_x * f_rep_x + f_rep_y * f_rep_y)
+
+                    # Anziehung zur Gruppenbildung
+                    if d_sq < ATTRACT_DIST * ATTRACT_DIST:
+                        factor = ATTRACT_FORCE / d
+                        f_att_x = dx * factor
+                        f_att_y = dy * factor
+                        force_x += f_att_x
+                        force_y += f_att_y
+                        # Speichere die anziehenden Kräfte für dieses Tier
+                        forces_att[i] = math.sqrt(f_att_x * f_att_x + f_att_y * f_att_y)
+
+            # Zufällige Kraft für alle Tiere
+            f_rand_x = random_generator_x[i]
+            force_x += f_rand_x
+            f_rand_y = random_generator_y[i]
+            force_y += f_rand_y
+            # Speichere die randomisierte Kräfte für dieses Tier
+            forces_random[i] = math.sqrt(f_rand_x * f_rand_x + f_rand_y * f_rand_y)
+
+        else:  # Normaler Modus ohne Panik
+            # Zufällige Kraft für alle Tiere
+            if bool_in_movement[i] == 1 and in_movement[i] == 1:
+                f_rand_x = random_generator_x[i]
+                force_x += f_rand_x
+                f_rand_y = random_generator_y[i]
+                force_y += f_rand_y
+                # Speichere die randomisierte Kräfte für dieses Tier
+                forces_random[i] = math.sqrt(f_rand_x * f_rand_x + f_rand_y * f_rand_y)
+            else:
+                force_x = 0.0
+                force_y = 0.0
+                forces_random[i] = 0.0
+
+        # Fluchtkraft: Falls panisch und Panikquelle gültig
+        if panicked[i] == 1 and panic_origin[0] >= 0:
+            dx = pos_x[i] - panic_origin[0]
+            dy = pos_y[i] - panic_origin[1]
+            d_sq = dx * dx + dy * dy
+            if d_sq > 0.0:
+                d = math.sqrt(d_sq)
+                f_flee_x = (dx / d) * FLEE_FORCE
+                f_flee_y = (dy / d) * FLEE_FORCE
+                force_x += f_flee_x
+                force_y += f_flee_y
+                # Speichere die repulsiven Kräfte für dieses Tier
+                forces_flee[i] = math.sqrt(f_flee_x * f_flee_x + f_flee_y * f_flee_y)
+
+        # Begrenze die Gesamtkraft
+        f_mag = math.sqrt(force_x * force_x + force_y * force_y)
+        if f_mag > MAX_FORCE:
+            scale = MAX_FORCE / f_mag
+            force_x *= scale
+            force_y *= scale
+            f_mag = MAX_FORCE  # Nach dem Clampen
+
+        # Speichere die Nettokraft (die Summe aller wirkenden Kräfte) für dieses Tier
+        forces[i] = f_mag
+
+        # Aktualisiere die Geschwindigkeit
+        vel_x[i] += force_x
+        vel_y[i] += force_y
+
+        # Kollision mit den Wänden: Korrigiere Position und setze Geschwindigkeit in Richtung der Wand auf 0.
+        if pos_x[i] < ANIMAL_RADIUS:
+            pos_x[i] = ANIMAL_RADIUS
+            if vel_x[i] < 0:
+                vel_x[i] = 0.0
+        elif pos_x[i] > WIDTH - ANIMAL_RADIUS:
+            pos_x[i] = WIDTH - ANIMAL_RADIUS
+            if vel_x[i] > 0:
+                vel_x[i] = 0.0
+
+        if pos_y[i] < ANIMAL_RADIUS:
+            pos_y[i] = ANIMAL_RADIUS
+            if vel_y[i] < 0:
+                vel_y[i] = 0.0
+        elif pos_y[i] > HEIGHT - ANIMAL_RADIUS:
+            pos_y[i] = HEIGHT - ANIMAL_RADIUS
+            if vel_y[i] > 0:
+                vel_y[i] = 0.0
+
+        # Kollision mit einem anderen Tier: Korrigiere Position und setze Geschwindigkeit in Richtung des anderen Tiers auf 0.
+        if panicked[i] == 1:
+            for j in range(n):
+                if j == i:
+                    continue
+                dx = pos_x[i] - pos_x[j]
+                dy = pos_y[i] - pos_y[j]
+                d_sq = dx * dx + dy * dy
+                if d_sq < 4 * ANIMAL_RADIUS * ANIMAL_RADIUS:
+                    d = math.sqrt(d_sq)
+                    overlap = 2 * ANIMAL_RADIUS - d
+                    if d_sq > 0.0:
+                        scale = overlap / d
+                        vel_x[i] += dx * scale
+                        vel_y[i] += dy * scale
+        else:
+            if bool_in_movement[i] == 1 and in_movement[i] == 1:
+                for j in range(n):
+                    if j == i:
+                        continue
+                    dx = pos_x[i] - pos_x[j]
+                    dy = pos_y[i] - pos_y[j]
+                    d_sq = dx * dx + dy * dy
+                    if d_sq < 4 * ANIMAL_RADIUS * ANIMAL_RADIUS:
+                        d = math.sqrt(d_sq)
+                        overlap = 2 * ANIMAL_RADIUS - d
+                        if d_sq > 0.0:
+                            scale = overlap / d
+                            vel_x[i] += dx * scale
+                            vel_y[i] += dy * scale
+
+        speed = math.sqrt(vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i])
+        if speed > MAX_SPEED:
+            scale = MAX_SPEED / speed
+            vel_x[i] *= scale
+            vel_y[i] *= scale
+
+        # Aktualisiere die Position
+        pos_x[i] += vel_x[i]
+        pos_y[i] += vel_y[i]
+
+
+# ------------------ GPU Kernel: Panikübertragung ------------------
+@cuda.jit
+def transmit_panic_kernel(pos_x, pos_y, panicked, n, transmission_dist_sq):
+    i = cuda.grid(1)
+    if i < n:
+        if panicked[i] == 0:
+            for j in range(n):
+                if panicked[j] == 1:
+                    dx = pos_x[i] - pos_x[j]
+                    dy = pos_y[i] - pos_y[j]
+                    d_sq = dx * dx + dy * dy
+                    if d_sq < transmission_dist_sq:
+                        panicked[i] = 1
+                        break
+
+
+# ------------------ GPU Kernel: Reduktion zur Summierung des panicked-Arrays ------------------
+@cuda.jit
+def reduce_sum_kernel(arr, partial_sums):
+    sdata = cuda.shared.array(128, dtype=int32)
+    tid = cuda.threadIdx.x
+    i = cuda.blockIdx.x * cuda.blockDim.x * 2 + tid
+    s = 0
+    if i < arr.shape[0]:
+        s = arr[i]
+    if i + cuda.blockDim.x < arr.shape[0]:
+        s += arr[i + cuda.blockDim.x]
+    sdata[tid] = s
+    cuda.syncthreads()
+    s_val = cuda.blockDim.x // 2
+    while s_val > 0:
+        if tid < s_val:
+            sdata[tid] += sdata[tid + s_val]
+        cuda.syncthreads()
+        s_val //= 2
+    if tid == 0:
+        partial_sums[cuda.blockIdx.x] = sdata[0]
+
+
+def gpu_reduce_sum(d_arr, n):
+    threads_per_block = 128
+    blocks = (n + threads_per_block * 2 - 1) // (threads_per_block * 2)
+    d_partial = cuda.device_array(blocks, dtype=np.int32)
+    reduce_sum_kernel[blocks, threads_per_block](d_arr, d_partial)
+    cuda.synchronize()
+    partial = d_partial.copy_to_host()
+    return partial.sum()
+
+
+# ------------------ Initialisierung der Simulation ------------------
+def initialize_simulation():
+    n = NUM_ANIMALS
+    pos_x = np.empty(n, dtype=np.float32)
+    pos_y = np.empty(n, dtype=np.float32)
+    vel_x = np.zeros(n, dtype=np.float32)
+    vel_y = np.zeros(n, dtype=np.float32)
+    bool_in_movement = np.zeros(n, dtype=np.int32)
+    panicked = np.zeros(n, dtype=np.int32)
+    index = 0
+    clusters = NUM_CLUSTERS
+    animals_per_cluster = n // clusters
+    rest = n % clusters
+    for c in range(clusters):
+        cluster_center_x = random.randint(MARGIN, WIDTH - MARGIN)
+        cluster_center_y = random.randint(MARGIN, HEIGHT - MARGIN)
+        group_size = animals_per_cluster + (1 if rest > 0 else 0)
+        if rest > 0:
+            rest -= 1
+        for i in range(group_size):
+            if index >= n:
+                break
+            angle = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(0, CLUSTER_SPREAD)
+            pos_x[index] = cluster_center_x + math.cos(angle) * radius
+            pos_y[index] = cluster_center_y + math.sin(angle) * radius
+            bool_in_movement[index] = random.randint(0, 1)
+            if bool_in_movement[index] == 1:
+                vel_x[index] = random.uniform(-RANDOM_FORCE, RANDOM_FORCE)
+                vel_y[index] = random.uniform(-RANDOM_FORCE, RANDOM_FORCE)
+            panicked[index] = 0
+            index += 1
+        if index >= n:
+            break
+    return pos_x, pos_y, vel_x, vel_y, bool_in_movement, panicked
+
+
+# ------------------ Simulation: Pygame + GPU ------------------
+def run_simulation():
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Massenpanik im Stall (GPU beschleunigt)")
+    clock = pygame.time.Clock()
+    FPS = 60
+
+    pos_x, pos_y, vel_x, vel_y, in_movement, panicked = initialize_simulation()
+    data_pos.append((pos_x, pos_y))  # for plot
+
+    n = NUM_ANIMALS
+
+    # Übertrage den Zustand in den GPU-Speicher
+    d_pos_x = cuda.to_device(pos_x)
+    d_pos_y = cuda.to_device(pos_y)
+    d_vel_x = cuda.to_device(vel_x)
+    d_vel_y = cuda.to_device(vel_y)
+    d_in_movement = cuda.to_device(in_movement)
+    d_panicked = cuda.to_device(panicked)
+
+    # Allocate array for forces (Netto-Kraft pro Tier)
+    d_forces = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_forces_random = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_forces_rep = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_forces_att = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_forces_flee = cuda.to_device(np.empty(n, dtype=np.float32))
+
+    # Panic origin: initial ungültig ([-1,-1] signalisiert "keine Panikquelle")
+    panic_origin_host = np.array([-1.0, -1.0], dtype=np.float32)
+    d_panic_origin = cuda.to_device(panic_origin_host)
+
+    # random number generator
+    d_forces_random_generator_x = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_forces_random_generator_y = cuda.to_device(np.empty(n, dtype=np.float32))
+    d_bool_in_movement = cuda.to_device(np.zeros(n, dtype=np.int32))
+
+    sim_time = 0
+    while not terminate_event.is_set():
+        dt = clock.tick(FPS)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                terminate_event.set()
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                click_x, click_y = event.pos
+                panic_origin_host[0] = click_x
+                panic_origin_host[1] = click_y
+                d_panic_origin.copy_to_device(panic_origin_host)
+                # Setze Panikstatus für Tiere in der Nähe des Klicks
+                pos_x_host = d_pos_x.copy_to_host()
+                pos_y_host = d_pos_y.copy_to_host()
+                for i in range(n):
+                    dx = pos_x_host[i] - click_x
+                    dy = pos_y_host[i] - click_y
+                    if math.sqrt(dx * dx + dy * dy) < PANIC_CLICK_RADIUS:
+                        panicked[i] = 1
+                d_panicked.copy_to_device(panicked)
+
+        # Panikübertragung: komplett auf der GPU
+        threads_per_block = 128
+        blocks = (n + threads_per_block - 1) // threads_per_block
+        transmit_panic_kernel[blocks, threads_per_block](
+            d_pos_x,
+            d_pos_y,
+            d_panicked,
+            n,
+            PANIC_TRANSMISSION_DIST * PANIC_TRANSMISSION_DIST,
+        )
+        cuda.synchronize()
+
+        # Berechne das Panikverhältnis auf der GPU per Reduktion
+        panicked_count = gpu_reduce_sum(d_panicked, n)
+        panic_ratio = panicked_count / n
+
+        # Speichere Werte für den Plot (sim_time in s)
+        data_x.append(sim_time / 1000.0)
+        data_y_panic.append(panic_ratio)
+
+        # Schalte in vereinfachten Modus, wenn >50% panisch sind
+        panic_mode = 1 if panic_ratio > 0.5 else 0
+
+        # Berechne randomierte Kräfte für alle Tiere
+        rand_movements = np.zeros((n, 2), dtype=np.float32)
+        rand_movements_bool = np.zeros(n, dtype=np.int32)
+        for i in range(n):
+            rand_movements[i, 0] = random.uniform(-RANDOM_FORCE, RANDOM_FORCE)
+            rand_movements[i, 1] = random.uniform(-RANDOM_FORCE, RANDOM_FORCE)
+            rand_movements_bool[i] = random.randint(0, 1)
+        d_forces_random_generator_x.copy_to_device(rand_movements[:, 0])
+        d_forces_random_generator_y.copy_to_device(rand_movements[:, 1])
+
+        # Ändere den Bewegunszuastand der Tiere randomisiert
+        d_bool_in_movement.copy_to_device(rand_movements_bool)
+
+        # Update der Tiere auf der GPU inkl. Berechnung der Nettokraft
+        update_animals_kernel[blocks, threads_per_block](
+            d_pos_x,
+            d_pos_y,
+            d_vel_x,
+            d_vel_y,
+            d_in_movement,
+            d_bool_in_movement,
+            d_panicked,
+            d_panic_origin,
+            n,
+            panic_mode,
+            d_forces_random_generator_x,
+            d_forces_random_generator_y,
+            d_forces,
+            d_forces_random,
+            d_forces_att,
+            d_forces_rep,
+            d_forces_flee,
+        )
+        cuda.synchronize()
+
+        # Kopiere die aktuellen Zustände zurück
+        pos_x_host = d_pos_x.copy_to_host()
+        pos_y_host = d_pos_y.copy_to_host()
+        panicked_host = d_panicked.copy_to_host()
+        forces_host = d_forces.copy_to_host()
+        forces_random_host = d_forces_random.copy_to_host()
+        forces_att_host = d_forces_att.copy_to_host()
+        forces_rep_host = d_forces_rep.copy_to_host()
+        forces_flee_host = d_forces_flee.copy_to_host()
+
+        avg_force = float(np.mean(forces_host))
+        avg_force_random = float(np.mean(forces_random_host))
+        avg_force_att = float(np.mean(forces_att_host))
+        avg_force_rep = float(np.mean(forces_rep_host))
+        avg_force_flee = float(np.mean(forces_flee_host))
+
+        data_force.append(avg_force)  # Durchschnittliche Nettokraft
+        data_force_rand.append(avg_force_random)  # Zufallskraft
+        data_force_att.append(avg_force_att)  # Anziehungskraft
+        data_force_rep.append(avg_force_rep)  # Abstoßungskraft
+        data_force_flee.append(avg_force_flee)  # Fluchtkraft
+
+        # Aktualisiere die globalen Infos, die im Tkinter-Fenster angezeigt werden
+        current_info["panic_ratio"] = panic_ratio
+        current_info["panic_count"] = panicked_count
+        current_info["force"] = avg_force
+        current_info["force_rand"] = avg_force_random
+        current_info["force_att"] = avg_force_att
+        current_info["force_rep"] = avg_force_rep
+        current_info["force_flee"] = avg_force_flee
+
+        screen.fill((30, 30, 30))
+        for i in range(n):
+            color = (255, 0, 0) if panicked_host[i] == 1 else (0, 255, 0)
+            pygame.draw.circle(
+                screen, color, (int(pos_x_host[i]), int(pos_y_host[i])), ANIMAL_RADIUS
+            )
+        pygame.display.flip()
+
+        sim_time += dt
+
+    pygame.quit()
+
+
+# ------------------ Tkinter Fenster mit Matplotlib Diagramm ------------------
+def run_tkinter():
+    root = tk.Tk()
+    root.title("Echtzeit-Auswertung: Panikverhältnis und Kräfte")
+
+    # Label für die aktuellen Werte
+    info_label = tk.Label(root, text="", font=("Arial", 10), justify=tk.LEFT)
+    info_label.pack(side=tk.TOP, anchor="w", padx=10, pady=5)
+
+    fig, ax1 = plt.subplots()
+    ax1.set_xlabel("Zeit (s)")
+    ax1.set_ylabel("Panikanteil", color="red")
+    ax1.set_ylim(0, 1.2)
+    (line1,) = ax1.plot([], [], "r-", label="Panikanteil")
+
+    # Zweite y-Achse für die Nettokraft
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Durchschnittliche Nettokraft", color="blue")
+    ax2.set_ylim(0, MAX_FORCE * 1.5)
+    (line2,) = ax2.plot([], [], "b-", label="Kraft (gesamt)")
+    (line3,) = ax2.plot([], [], "g-", label="Zufallskraft")
+    (line4,) = ax2.plot([], [], "c-", label="Anziehungskraft")
+    (line5,) = ax2.plot([], [], "m-", label="Abstoßungskraft")
+    (line6,) = ax2.plot([], [], "y-", label="Fluchtkraft")
+    ax1.legend(loc="upper left")
+    ax2.legend(loc="upper right")
+
+    canvas = FigureCanvasTkAgg(fig, master=root)
+    canvas.get_tk_widget().pack()
+
+    def update_plot():
+        if terminate_event.is_set():
+            root.destroy()
+            sys.exit(0)
+            return
+        if not (
+            len(data_x)
+            == len(data_y_panic)
+            == len(data_force)
+            == len(data_force_rand)
+            == len(data_force_att)
+            == len(data_force_rep)
+            == len(data_force_flee)
+        ):
+            # Überspringe diesen Aufruf, wenn die Längen nicht übereinstimmen
+            root.after(200, update_plot)
+            return
+        # Daten begrenzen, falls zu viele Werte vorhanden
+        xdata = data_x
+
+        line1.set_xdata(xdata)
+        line1.set_ydata(data_y_panic)
+        line2.set_xdata(xdata)
+        line2.set_ydata(data_force)
+        line3.set_xdata(xdata)
+        line3.set_ydata(data_force_rand)
+        line4.set_xdata(xdata)
+        line4.set_ydata(data_force_att)
+        line5.set_xdata(xdata)
+        line5.set_ydata(data_force_rep)
+        line6.set_xdata(xdata)
+        line6.set_ydata(data_force_flee)
+
+        ax1.relim()
+        ax1.autoscale_view()
+        ax2.relim()
+        ax2.autoscale_view()
+        canvas.draw()
+
+        # Aktualisiere das Info-Label mit den aktuellen Werten
+        info_text = (
+            f"Panikanteil: {current_info['panic_ratio']:.3f}\n"
+            f"Panikzahl: {current_info['panic_count']}\n"
+            f"Kraft (gesamt): {current_info['force']:.2f}\n"
+            f"Zufallskraft: {current_info['force_rand']:.2f}\n"
+            f"Anziehungskraft: {current_info['force_att']:.2f}\n"
+            f"Abstoßungskraft: {current_info['force_rep']:.2f}\n"
+            f"Fluchtkraft: {current_info['force_flee']:.2f}"
+        )
+        info_label.config(text=info_text)
+
+        root.after(200, update_plot)  # alle 200ms aktualisieren
+
+    def on_close():
+        terminate_event.set()
+        root.destroy()
+        sys.exit(0)
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    update_plot()
+    root.mainloop()
+
+
+# ------------------ Hauptprogramm ------------------
+if __name__ == "__main__":
+    # Starte die Simulation (Pygame + GPU) in einem separaten Thread
+    sim_thread = threading.Thread(target=run_simulation, daemon=True)
+    sim_thread.start()
+    # Tkinter (mit Matplotlib) läuft im Hauptthread
+    run_tkinter()
