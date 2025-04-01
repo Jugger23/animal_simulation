@@ -32,8 +32,6 @@ NUM_ANIMALS = 500  # Gesamtanzahl der Tiere
 NUM_CLUSTERS_IN_X = 8  # Anzahl der anfänglichen Gruppen in x-Richtung
 WIDTH, HEIGHT = 150, 1000  # [dm]
 ANIMAL_RADIUS = 3  # Darstellungsradius [dm]
-PANIC_CLICK_RADIUS = 100.0  # Radius, in dem ein Mausklick Panik auslöst [dm]
-PANIC_TRANSMISSION_DIST = 10.0  # Abstand, in dem Panik übertragen wird [dm]
 MAX_SPEED = 0.4  # Maximale Geschwindigkeit der Tiere [dm/s]
 MAX_FORCE = 15.0  # Maximale Kraft, die auf ein Tier wirken darf [kgm/s^2]
 REPULSION_DIST = 10.0  # Radius um Tier, wo Abstoßungskraft wirkt. Kraft wird größer mit kleiner werdendem Abstand [dm]
@@ -41,9 +39,16 @@ REPULSION_FORCE = 0.5  # Stärke der Abstoßungskraft [kgm/s^2]
 ATTRACT_DIST = 15.0  # Radius um Tier, in dem anziehende Kräfte wirken
 ATTRACT_FORCE = 0.5  # Stärke der Anziehungskraft [kgm/s^2]
 FLEE_FORCE = 10.0  # Fluchtkraft von der Panikquelle [kgm/s^2]
-RANDOM_FORCE = 1.0  # Zufällige Kraft, die immer wirkt [kgm/s^2]
+RANDOM_FORCE = 0.0  # Zufällige Kraft, die immer wirkt [kgm/s^2]
 SCAL_TIME = 10.0  # Zeitfaktor für die Simulation (Skalierung der Zeit)
-SHOW_FORCE_FIELDS = True  # Zeige die Kräfte an (für Debugging-Zwecke)
+SHOW_FORCE_FIELDS = False  # Zeige die Kräfte an (für Debugging-Zwecke)
+
+# Click parameters for Flee force
+PANIC_CLICK_RADIUS = 100.0  # Radius, in dem ein Mausklick Panik auslöst [dm]
+PANIC_BY_CLICK = True  # Panik Position durch Mausklick aktivieren
+PANIC_POS_X = -5.0  # X-Position der Panikquelle (initial ungültig)
+PANIC_POS_Y = -5.0  # Y-Position der Panikquelle (initial ungültig)
+PANIC_TRANSMISSION_DIST = 5.0  # Abstand, in dem Panik übertragen wird [dm]
 
 # Parameter für die Gruppenbildung beim Start
 CLUSTER_SPREAD = 5  # Streuung der Tiere um das Gruppenzentrum
@@ -59,7 +64,6 @@ current_info = {
     "force_rep": 0.0,
     "force_flee": 0.0,
 }
-
 
 
 # ------------- Globale Daten für die zeitlichen Positionen der Tiere -------------
@@ -96,6 +100,8 @@ def update_animals_kernel(
     forces_att,
     forces_rep,
     forces_flee,
+    forces_flee_x,
+    forces_flee_y,
 ):
     i = cuda.grid(1)
 
@@ -179,17 +185,60 @@ def update_animals_kernel(
 
         # Fluchtkraft: Falls panisch und Panikquelle gültig
         if panicked[i] == 1 and panic_origin[0] >= 0:
-            dx = pos_x[i] - panic_origin[0]
-            dy = pos_y[i] - panic_origin[1]
+            sign_x = 1.0 if panic_origin[0] > pos_x[i] else -1.0    # Position des Tiers relativ zur Panikquelle
+            sign_y = 1.0 if panic_origin[1] > pos_y[i] else -1.0
+
+            f_flee_x = 0.0
+            f_flee_y = 0.0
+
+            dx = pos_x[i] - ANIMAL_RADIUS - panic_origin[0]
+            dy = pos_y[i] - ANIMAL_RADIUS - panic_origin[1]
             d_sq = dx * dx + dy * dy
-            if d_sq > 0.0:
+
+            if d_sq > 0.0 and d_sq < PANIC_CLICK_RADIUS * PANIC_CLICK_RADIUS:
                 d = math.sqrt(d_sq)
-                f_flee_x = (dx / d) * FLEE_FORCE
-                f_flee_y = (dy / d) * FLEE_FORCE
-                force_x += f_flee_x
-                force_y += f_flee_y
-                # Speichere die repulsiven Kräfte für dieses Tier
-                forces_flee[i] = math.sqrt(f_flee_x * f_flee_x + f_flee_y * f_flee_y)
+                if dx > 0:
+                    dx = -dx
+                if dy > 0:
+                    dy = -dy
+                f_flee_x = FLEE_FORCE * 0.5 * (1 - sign_x*(dx * dx) / PANIC_CLICK_RADIUS) + 0.5 * FLEE_FORCE
+                f_flee_y = FLEE_FORCE * 0.5 * (1 - sign_y*(dy * dy) / PANIC_CLICK_RADIUS) + 0.5 * FLEE_FORCE
+            elif d_sq == 0.0:
+                f_flee_x = FLEE_FORCE
+                f_flee_y = FLEE_FORCE
+            elif d_sq >= PANIC_CLICK_RADIUS * PANIC_CLICK_RADIUS and forces_flee_x[i] > 0.0:        # debug: Fliehen von Tieren ausserhalb des Panikradius muss in Richtung der aktuellen Laufrichtung sein, oder panisch in irgendeine Richtung
+                f_flee_x = -sign_x * 0.5 * FLEE_FORCE
+                f_flee_y = -sign_y * 0.5 * FLEE_FORCE
+            else:
+                force_dir_x = 0.0
+                force_dir_y = 0.0
+                count = 0
+                for j in range(n):
+                    if panicked[j] == 1:
+                        dx = pos_x[i] - pos_x[j] - 2 * ANIMAL_RADIUS
+                        dy = pos_y[i] - pos_y[j] - 2 * ANIMAL_RADIUS
+                        d_sq = dx * dx + dy * dy
+                        if d_sq < PANIC_TRANSMISSION_DIST * PANIC_TRANSMISSION_DIST:
+                            force_dir_x += start_conditions[4][j]* (1 - dx / PANIC_TRANSMISSION_DIST)      # Gewichtung der Laufrichtung der Tiere mit Abstand zu alle panischen Tiere, die näher als PANIC_TRANSMISSION_DIST sind: nähere panische Tiere bestimmen die Fluchtrichtung
+                            force_dir_y += start_conditions[5][j]* (1 - dy / PANIC_TRANSMISSION_DIST)
+                            count += 1
+                if count > 0:            
+                    force_dir_x /= count
+                    force_dir_y /= count
+                move_x = start_conditions[4][i] + force_dir_x
+                move_y = start_conditions[5][i] + force_dir_y
+                d_movement = math.sqrt(move_x * move_x + move_y * move_y)
+                if move_x is not math.nan and move_y is not math.nan and d_movement > 0:
+                    f_flee_x = move_x / d_movement * FLEE_FORCE    # Sum of direction of movement of EGO animal and of fleeing animals in its environment
+                    f_flee_y = move_y / d_movement * FLEE_FORCE
+
+            # Berechne die resultierenden Fluchtkräfte für dieses Tier
+            force_x += f_flee_x
+            force_y += f_flee_y
+            forces_flee_x[i] = f_flee_x
+            forces_flee_y[i] = f_flee_y
+            # Speichere die repulsiven Kräfte für dieses Tier
+            forces_flee[i] = math.sqrt(f_flee_x * f_flee_x + f_flee_y * f_flee_y)
 
         # Begrenze die Gesamtkraft
         f_mag = math.sqrt(force_x * force_x + force_y * force_y)
@@ -241,8 +290,8 @@ def transmit_panic_kernel(pos_x, pos_y, panicked, n, transmission_dist_sq):
         if panicked[i] == 0:
             for j in range(n):
                 if panicked[j] == 1:
-                    dx = pos_x[i] - pos_x[j]
-                    dy = pos_y[i] - pos_y[j]
+                    dx = pos_x[i] - pos_x[j] - 2 * ANIMAL_RADIUS
+                    dy = pos_y[i] - pos_y[j] - 2 * ANIMAL_RADIUS
                     d_sq = dx * dx + dy * dy
                     if d_sq < transmission_dist_sq:
                         panicked[i] = 1
@@ -411,12 +460,14 @@ def run_simulation():
         pos_y,
         vel_x,
         vel_y,
+        np.zeros(NUM_ANIMALS, dtype=np.float32),  # Dummy-Wert für Richtungsvektor in x-Richtung
+        np.zeros(NUM_ANIMALS, dtype=np.float32),  # Dummy-Wert für Richtungsvektor in y-Richtung     
     ]  # Startbedingungen für die Simulation
     data_pos.append((pos_x, pos_y))  # for plot
 
     n = NUM_ANIMALS
 
-    # Kraft zu Positionsberechnung
+    # Kraft zu Positionsberechnung und GEschwindigkeitsberechnung
     d_start_conditions = cuda.to_device(start_conditions)
 
     # Übertrage den Zustand in den GPU-Speicher
@@ -434,6 +485,10 @@ def run_simulation():
     d_forces_att = cuda.to_device(np.empty(n, dtype=np.float32))
     d_forces_flee = cuda.to_device(np.empty(n, dtype=np.float32))
 
+    # Array für Flee Kraft zur Panikübertragung
+    d_forces_flee_x = cuda.to_device(np.zeros(n, dtype=np.float32))
+    d_forces_flee_y = cuda.to_device(np.zeros(n, dtype=np.float32))
+
     # Panic origin: initial ungültig ([-1,-1] signalisiert "keine Panikquelle")
     panic_origin_host = np.array([-1.0, -1.0], dtype=np.float32)
     d_panic_origin = cuda.to_device(panic_origin_host)
@@ -449,7 +504,11 @@ def run_simulation():
             if event.type == pygame.QUIT:
                 terminate_event.set()
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                click_x, click_y = event.pos
+                if PANIC_BY_CLICK:
+                    click_x, click_y = event.pos
+                else:
+                    click_x = PANIC_POS_X
+                    click_y = PANIC_POS_Y
                 panic_origin_host[0] = click_x
                 panic_origin_host[1] = click_y
                 d_panic_origin.copy_to_device(panic_origin_host)
@@ -463,9 +522,10 @@ def run_simulation():
                         panicked[i] = 1
                 d_panicked.copy_to_device(panicked)
 
-        # Panikübertragung: komplett auf der GPU
         threads_per_block = 128
         blocks = (n + threads_per_block - 1) // threads_per_block
+
+        # Panikübertragung: komplett auf der GPU
         transmit_panic_kernel[blocks, threads_per_block](
             d_pos_x,
             d_pos_y,
@@ -520,8 +580,22 @@ def run_simulation():
             d_forces_att,
             d_forces_rep,
             d_forces_flee,
+            d_forces_flee_x,
+            d_forces_flee_y,
         )
         cuda.synchronize()
+
+        pos_prev_x = start_conditions[0].copy()
+        pos_prev_y = start_conditions[1].copy()
+
+        # Update start_conditions für die nächste Iteration
+        start_conditions[0] = d_pos_x.copy_to_host()
+        start_conditions[1] = d_pos_y.copy_to_host()
+        start_conditions[2] = d_vel_x.copy_to_host()
+        start_conditions[3] = d_vel_y.copy_to_host()
+        start_conditions[4] = start_conditions[0] - pos_prev_x # Bewegungsanteil in x-Richtung
+        start_conditions[5] = start_conditions[1] - pos_prev_y # Bewegungsanteil in y-Richtung
+        d_start_conditions = cuda.to_device(start_conditions)
 
         # Rufe den Kernel zur Kollisionsauflösung auf
         resolve_collisions_with_force_kernel[1, 1](
@@ -530,8 +604,8 @@ def run_simulation():
         cuda.synchronize()
 
         # Kopiere die aktuellen Zustände zurück
-        pos_x_host = d_pos_x.copy_to_host()
-        pos_y_host = d_pos_y.copy_to_host()
+        pos_x_host = start_conditions[0]
+        pos_y_host = start_conditions[1]
         panicked_host = d_panicked.copy_to_host()
         forces_host = d_forces.copy_to_host()
         forces_random_host = d_forces_random.copy_to_host()
