@@ -4,9 +4,10 @@
 # - Erl.: position of one aninmal is independent of the others: animals can be on the same position
 # - Erl.: Panic status not working properly: Panic status is not being updated properly. It is not being updated when the panic source is removed.
 # - Erl.: Random force: approach to include the random force without adding it in every iteration. Just add it once in the beginning and adjust it radnomly so the movement can switch to other directions and veloctities abruptly.
-# - Add random force at the beginning to all animals so that an animal can move and after some iteration stand still in a group
+# - Erl.: Add random force at the beginning to all animals so that an animal can move and after some iteration stand still in a group
+# - Erl.: Add repulsion and attraction force since beginning
+# - Flee force leads to movement circular away from panic origin. So fine?
 # - video of animals for different force paramerters and threee different panic positions
-# - Add repulsion and attraction force since beginning but with less intensity if animal is not in panic
 # - Add characteristics of the animals: leaders, followers, stupid, smart, etc.
 # - Increase randomness to some animals so that they can suprisingly move in another different direction
 # - Add third dimension to the simulation: Jumping/flying and stapling animals
@@ -35,9 +36,9 @@ PANIC_CLICK_RADIUS = 100.0  # Radius, in dem ein Mausklick Panik auslöst [dm]
 PANIC_TRANSMISSION_DIST = 10.0  # Abstand, in dem Panik übertragen wird [dm]
 MAX_SPEED = 0.4  # Maximale Geschwindigkeit der Tiere [dm/s]
 MAX_FORCE = 15.0  # Maximale Kraft, die auf ein Tier wirken darf [kgm/s^2]
-REPULSION_DIST = 5.0  # Radius um Tier, wo Abstoßungskraft wirkt. Kraft wird größer mit kleiner werdendem Abstand [dm]
+REPULSION_DIST = 10.0  # Radius um Tier, wo Abstoßungskraft wirkt. Kraft wird größer mit kleiner werdendem Abstand [dm]
 REPULSION_FORCE = 0.5  # Stärke der Abstoßungskraft [kgm/s^2]
-ATTRACT_DIST = 10.0  # Radius um Tier, in dem anziehende Kräfte wirken
+ATTRACT_DIST = 15.0  # Radius um Tier, in dem anziehende Kräfte wirken
 ATTRACT_FORCE = 0.5  # Stärke der Anziehungskraft [kgm/s^2]
 FLEE_FORCE = 10.0  # Fluchtkraft von der Panikquelle [kgm/s^2]
 RANDOM_FORCE = 1.0  # Zufällige Kraft, die immer wirkt [kgm/s^2]
@@ -58,6 +59,8 @@ current_info = {
     "force_rep": 0.0,
     "force_flee": 0.0,
 }
+
+
 
 # ------------- Globale Daten für die zeitlichen Positionen der Tiere -------------
 data_pos = []  # Positionen der Tiere
