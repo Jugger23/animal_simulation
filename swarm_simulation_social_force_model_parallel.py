@@ -6,7 +6,13 @@
 # - Erl.: Random force: approach to include the random force without adding it in every iteration. Just add it once in the beginning and adjust it radnomly so the movement can switch to other directions and veloctities abruptly.
 # - Erl.: Add random force at the beginning to all animals so that an animal can move and after some iteration stand still in a group
 # - Erl.: Add repulsion and attraction force since beginning
-# - Flee force leads to movement circular away from panic origin. So fine?
+# - Erl.: Flee force leads to movement circular away from panic origin. So fine?
+# - Erl.: Flee movement: work on transmit of fleeing direction
+        # - Erl.: Increase in flee force after being infected by other fleeing animals
+        # - Erl.: Direction of fleeing after being infected in the next iterationS
+# - Collision: redefine check if animals collapse to reduce jumping and independance to velocity scaling by time
+# - Random movement: animals should settle for a specific period of time after moving for a specific period of time
+# - View of both cameras relative to their position
 # - video of animals for different force paramerters and threee different panic positions
 # - Add characteristics of the animals: leaders, followers, stupid, smart, etc.
 # - Increase randomness to some animals so that they can suprisingly move in another different direction
@@ -23,36 +29,50 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import threading
 import sys
+import pandas as pd
 
 # ------------------ Globale Terminierung ------------------
 terminate_event = threading.Event()
 
+param_set = pd.read_csv(r'D:\Marcel\Documents\Arbeit\Minijob Wolution\parameter_set_tierbewegung.csv', delimiter=',')
+
+PARAMETER_SET = 1
+
 # ------------------ Parameter der Simulation ------------------
-NUM_ANIMALS = 500  # Gesamtanzahl der Tiere
-NUM_CLUSTERS_IN_X = 8  # Anzahl der anfänglichen Gruppen in x-Richtung
-WIDTH, HEIGHT = 150, 1000  # [dm]
-ANIMAL_RADIUS = 3  # Darstellungsradius [dm]
-MAX_SPEED = 0.4  # Maximale Geschwindigkeit der Tiere [dm/s]
-MAX_FORCE = 15.0  # Maximale Kraft, die auf ein Tier wirken darf [kgm/s^2]
-REPULSION_DIST = 10.0  # Radius um Tier, wo Abstoßungskraft wirkt. Kraft wird größer mit kleiner werdendem Abstand [dm]
-REPULSION_FORCE = 0.5  # Stärke der Abstoßungskraft [kgm/s^2]
-ATTRACT_DIST = 15.0  # Radius um Tier, in dem anziehende Kräfte wirken
-ATTRACT_FORCE = 0.5  # Stärke der Anziehungskraft [kgm/s^2]
-FLEE_FORCE = 10.0  # Fluchtkraft von der Panikquelle [kgm/s^2]
-RANDOM_FORCE = 0.0  # Zufällige Kraft, die immer wirkt [kgm/s^2]
-SCAL_TIME = 10.0  # Zeitfaktor für die Simulation (Skalierung der Zeit)
+
+# Simulationszeit
+FPS = float(param_set['FPS'].iloc[PARAMETER_SET])  # Updates pro Sekunde (= 1.0 --> Echtzeit)
+
+# Umgebungsvariablen
+NUM_ANIMALS = int(param_set['NUM_ANIMALS'].iloc[PARAMETER_SET])  # Gesamtanzahl der Tiere
+MASS_ANIMAL = float(param_set['MASS_ANIMAL'].iloc[PARAMETER_SET])    # kg
+NUM_CLUSTERS_IN_X = int(param_set['NUM_CLUSTERS_IN_X'].iloc[PARAMETER_SET])  # Anzahl der anfänglichen Gruppen in x-Richtung
+WIDTH, HEIGHT = int(param_set['WIDTH'].iloc[PARAMETER_SET]), int(param_set['HEIGHT'].iloc[PARAMETER_SET])  # [dm]
+ANIMAL_RADIUS = float(param_set['ANIMAL_RADIUS'].iloc[PARAMETER_SET])  # Darstellungsradius [dm]
+
+# Kräfte und Geschwindigkeiten
+MAX_SPEED = float(param_set['MAX_SPEED'].iloc[PARAMETER_SET])  # Maximale Geschwindigkeit der Tiere [dm/s]
+MAX_FORCE = float(param_set['MAX_FORCE'].iloc[PARAMETER_SET])  # Maximale Kraft, die auf ein Tier wirken darf [kgm/s^2]
+REPULSION_DIST = float(param_set['REPULSION_DIST'].iloc[PARAMETER_SET])  # Radius um Tier, wo Abstoßungskraft wirkt. Kraft wird größer mit kleiner werdendem Abstand [dm]
+REPULSION_FORCE = float(param_set['REPULSION_FORCE'].iloc[PARAMETER_SET])  # Stärke der Abstoßungskraft [kgm/s^2]
+ATTRACT_DIST = float(param_set['ATTRACT_DIST'].iloc[PARAMETER_SET])  # Radius um Tier, in dem anziehende Kräfte wirken
+ATTRACT_FORCE = float(param_set['ATTRACT_FORCE'].iloc[PARAMETER_SET])  # Stärke der Anziehungskraft [kgm/s^2]
+FLEE_FORCE = float(param_set['FLEE_FORCE'].iloc[PARAMETER_SET])  # Fluchtkraft von der Panikquelle [kgm/s^2]
+RANDOM_FORCE = float(param_set['RANDOM_FORCE'].iloc[PARAMETER_SET])  # Zufällige Kraft, die immer wirkt [kgm/s^2]
+
+# Plot
 SHOW_FORCE_FIELDS = False  # Zeige die Kräfte an (für Debugging-Zwecke)
 
 # Click parameters for Flee force
-PANIC_CLICK_RADIUS = 100.0  # Radius, in dem ein Mausklick Panik auslöst [dm]
+PANIC_CLICK_RADIUS = float(param_set['PANIC_CLICK_RADIUS'].iloc[PARAMETER_SET])  # Radius, in dem ein Mausklick Panik auslöst [dm]
 PANIC_BY_CLICK = True  # Panik Position durch Mausklick aktivieren
-PANIC_POS_X = -5.0  # X-Position der Panikquelle (initial ungültig)
-PANIC_POS_Y = -5.0  # Y-Position der Panikquelle (initial ungültig)
-PANIC_TRANSMISSION_DIST = 5.0  # Abstand, in dem Panik übertragen wird [dm]
+PANIC_POS_X = float(param_set['PANIC_POS_X'].iloc[PARAMETER_SET])  # X-Position der Panikquelle (initial ungültig)
+PANIC_POS_Y = float(param_set['PANIC_POS_Y'].iloc[PARAMETER_SET])  # Y-Position der Panikquelle (initial ungültig)
+PANIC_TRANSMISSION_DIST = float(param_set['PANIC_TRANSMISSION_DIST'].iloc[PARAMETER_SET])  # Abstand, in dem Panik übertragen wird [dm]
 
 # Parameter für die Gruppenbildung beim Start
-CLUSTER_SPREAD = 5  # Streuung der Tiere um das Gruppenzentrum
-MARGIN = 5  # Abstand zum Fensterrand
+CLUSTER_SPREAD = int(param_set['CLUSTER_SPREAD'].iloc[PARAMETER_SET])  # Streuung der Tiere um das Gruppenzentrum
+MARGIN = int(param_set['MARGIN'].iloc[PARAMETER_SET])  # Abstand zum Fensterrand
 
 # Aktuelle Messwerte
 current_info = {
@@ -201,14 +221,38 @@ def update_animals_kernel(
                     dx = -dx
                 if dy > 0:
                     dy = -dy
-                f_flee_x = FLEE_FORCE * 0.5 * (1 - sign_x*(dx * dx) / PANIC_CLICK_RADIUS) + 0.5 * FLEE_FORCE
-                f_flee_y = FLEE_FORCE * 0.5 * (1 - sign_y*(dy * dy) / PANIC_CLICK_RADIUS) + 0.5 * FLEE_FORCE
+                f_flee_x = FLEE_FORCE * 0.5 * (1 - sign_x*(dx * dx) / PANIC_CLICK_RADIUS) + FLEE_FORCE
+                f_flee_y = FLEE_FORCE * 0.5 * (1 - sign_y*(dy * dy) / PANIC_CLICK_RADIUS) + FLEE_FORCE
             elif d_sq == 0.0:
-                f_flee_x = FLEE_FORCE
-                f_flee_y = FLEE_FORCE
+                f_flee_x = 2 * FLEE_FORCE
+                f_flee_y = 2 * FLEE_FORCE
             elif d_sq >= PANIC_CLICK_RADIUS * PANIC_CLICK_RADIUS and forces_flee_x[i] > 0.0:        # debug: Fliehen von Tieren ausserhalb des Panikradius muss in Richtung der aktuellen Laufrichtung sein, oder panisch in irgendeine Richtung
-                f_flee_x = -sign_x * 0.5 * FLEE_FORCE
-                f_flee_y = -sign_y * 0.5 * FLEE_FORCE
+                move_x = start_conditions[4][i]
+                move_y = start_conditions[5][i]
+                d_movement = math.sqrt(move_x * move_x + move_y * move_y)
+                if d_movement > 0.0:
+                    f_flee_x = -sign_x * move_x / d_movement * FLEE_FORCE       # fliehen in Richtung der eigenen Bewegung i. A. zu Anziehungs- und Fliehkräften
+                    f_flee_y = -sign_y * move_x / d_movement * FLEE_FORCE
+                else:                                                           # falls sich Tier in der letzten Iteration GAR NICHT bewegt hat (z. B. weil es an andere Tiere geraten ist), soll es aber trotzdem fliehen (und zwar in die Richtung naher anderer fliehender Tiere)
+                    force_dir_x = 0.0
+                    force_dir_y = 0.0
+                    count = 0                                                    
+                    for j in range(n):
+                        if panicked[j] == 1:
+                            dx = pos_x[i] - pos_x[j] - 2 * ANIMAL_RADIUS
+                            dy = pos_y[i] - pos_y[j] - 2 * ANIMAL_RADIUS
+                            d_sq = dx * dx + dy * dy
+                            if d_sq < PANIC_TRANSMISSION_DIST * PANIC_TRANSMISSION_DIST:
+                                force_dir_x += start_conditions[4][j]* (1 - dx / PANIC_TRANSMISSION_DIST)      # Gewichtung der Laufrichtung der Tiere mit Abstand zu alle panischen Tiere, die näher als PANIC_TRANSMISSION_DIST sind: nähere panische Tiere bestimmen die Fluchtrichtung
+                                force_dir_y += start_conditions[5][j]* (1 - dy / PANIC_TRANSMISSION_DIST)
+                                count += 1
+                    if count > 0:            
+                        force_dir_x /= count
+                        force_dir_y /= count
+                    move_x = force_dir_x            # BEwegung des EGO Tiers nur in Richtung der umgebenden Tiere (da move_x und move_y, also die Bewegung des EGO Tiers, gleich NULL sind)
+                    move_y = force_dir_y
+                    f_flee_x = -sign_x * move_x / d_movement * FLEE_FORCE       
+                    f_flee_y = -sign_y * move_x / d_movement * FLEE_FORCE
             else:
                 force_dir_x = 0.0
                 force_dir_y = 0.0
@@ -227,10 +271,14 @@ def update_animals_kernel(
                     force_dir_y /= count
                 move_x = start_conditions[4][i] + force_dir_x
                 move_y = start_conditions[5][i] + force_dir_y
-                d_movement = math.sqrt(move_x * move_x + move_y * move_y)
-                if move_x is not math.nan and move_y is not math.nan and d_movement > 0:
-                    f_flee_x = move_x / d_movement * FLEE_FORCE    # Sum of direction of movement of EGO animal and of fleeing animals in its environment
-                    f_flee_y = move_y / d_movement * FLEE_FORCE
+                d_movement = math.sqrt(move_x * move_x + move_y * move_y)       # ist NULL, wenn 1. EGO Tier sich entgegen der Richtung eines fliehenden Tiers bewegt oder 2. die Summe in force_dir_x/y in Gegenrichtung zu der EGO Tierbewegung steht
+                if move_x is not math.nan and move_y is not math.nan:
+                    if d_movement > 0.0:
+                        f_flee_x = move_x / d_movement * FLEE_FORCE    # Sum of direction of movement of EGO animal and of fleeing animals in its environment
+                        f_flee_y = move_y / d_movement * FLEE_FORCE
+                    else:
+                        f_flee_x = force_dir_x * FLEE_FORCE     # EGO Tier folgt fliehenden Tieren (direkt Begungsumkehr in Richtung der fliehenden Tiere)
+                        f_flee_y = force_dir_y * FLEE_FORCE
 
             # Berechne die resultierenden Fluchtkräfte für dieses Tier
             force_x += f_flee_x
@@ -252,8 +300,14 @@ def update_animals_kernel(
         forces[i] = f_mag
 
         # Aktualisiere die Geschwindigkeit
-        vel_x[i] += force_x * SCAL_TIME * dt + start_conditions[2][i]
-        vel_y[i] += force_y * SCAL_TIME * dt + start_conditions[3][i]
+        if not math.isnan(force_x) and not math.isnan(force_y):
+            acc_x = force_x / MASS_ANIMAL
+            acc_y = force_y / MASS_ANIMAL
+
+        # Aktualisiere die Geschwindigkeit
+        if not math.isnan(force_x) and not math.isnan(force_y):
+            vel_x[i] += acc_x * dt
+            vel_y[i] += acc_y * dt
 
         # Begrenze die Geschwindigkeit
         speed = math.sqrt(vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i])
@@ -263,8 +317,8 @@ def update_animals_kernel(
             vel_y[i] = vel_y[i] * scale
 
         # Aktualisiere die Position
-        pos_x[i] += vel_x[i] * SCAL_TIME * dt
-        pos_y[i] += vel_y[i] * SCAL_TIME * dt
+        pos_x[i] += vel_x[i] * dt
+        pos_y[i] += vel_y[i] * dt
 
         # Kollision mit den Wänden: Korrigiere Position und setze Geschwindigkeit in Richtung der Wand auf 0.
         if pos_x[i] < ANIMAL_RADIUS:
@@ -284,7 +338,7 @@ def update_animals_kernel(
 
 # ------------------ GPU Kernel: Panikübertragung ------------------
 @cuda.jit
-def transmit_panic_kernel(pos_x, pos_y, panicked, n, transmission_dist_sq):
+def transmit_panic_kernel(pos_x, pos_y, panicked, n):
     i = cuda.grid(1)
     if i < n:
         if panicked[i] == 0:
@@ -293,7 +347,7 @@ def transmit_panic_kernel(pos_x, pos_y, panicked, n, transmission_dist_sq):
                     dx = pos_x[i] - pos_x[j] - 2 * ANIMAL_RADIUS
                     dy = pos_y[i] - pos_y[j] - 2 * ANIMAL_RADIUS
                     d_sq = dx * dx + dy * dy
-                    if d_sq < transmission_dist_sq:
+                    if d_sq < PANIC_TRANSMISSION_DIST * PANIC_TRANSMISSION_DIST:
                         panicked[i] = 1
                         break
 
@@ -450,8 +504,8 @@ def run_simulation():
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Massenpanik im Stall (GPU beschleunigt)")
     clock = pygame.time.Clock()
-    FPS = 60
-    dt = clock.tick(FPS) / 1000.0  # Zeit in Sekunden pro Frame
+    clock.tick(FPS)
+    dt = 1.0 / FPS  # Zeit in Sekunden pro Frame
     dt = np.float32(dt)  # Konvertiere dt in float32 für die GPU
 
     pos_x, pos_y, vel_x, vel_y, in_movement, panicked = initialize_simulation()
@@ -531,7 +585,6 @@ def run_simulation():
             d_pos_y,
             d_panicked,
             n,
-            PANIC_TRANSMISSION_DIST * PANIC_TRANSMISSION_DIST,
         )
         cuda.synchronize()
 
@@ -540,7 +593,7 @@ def run_simulation():
         panic_ratio = panicked_count / n
 
         # Speichere Werte für den Plot (sim_time in s)
-        data_x.append(sim_time / 1000.0)
+        data_x.append(sim_time)
         data_y_panic.append(panic_ratio)
 
         # Berechne randomisierte Kräfte für alle Tiere
@@ -588,6 +641,12 @@ def run_simulation():
         pos_prev_x = start_conditions[0].copy()
         pos_prev_y = start_conditions[1].copy()
 
+        # Rufe den Kernel zur Kollisionsauflösung auf
+        resolve_collisions_with_force_kernel[1, 1](
+            d_pos_x, d_pos_y, d_forces, n, ANIMAL_RADIUS, MAX_FORCE
+        )
+        cuda.synchronize()
+
         # Update start_conditions für die nächste Iteration
         start_conditions[0] = d_pos_x.copy_to_host()
         start_conditions[1] = d_pos_y.copy_to_host()
@@ -596,12 +655,6 @@ def run_simulation():
         start_conditions[4] = start_conditions[0] - pos_prev_x # Bewegungsanteil in x-Richtung
         start_conditions[5] = start_conditions[1] - pos_prev_y # Bewegungsanteil in y-Richtung
         d_start_conditions = cuda.to_device(start_conditions)
-
-        # Rufe den Kernel zur Kollisionsauflösung auf
-        resolve_collisions_with_force_kernel[1, 1](
-            d_pos_x, d_pos_y, d_forces, n, ANIMAL_RADIUS, MAX_FORCE
-        )
-        cuda.synchronize()
 
         # Kopiere die aktuellen Zustände zurück
         pos_x_host = start_conditions[0]
@@ -633,6 +686,14 @@ def run_simulation():
         current_info["force_att"] = avg_force_att
         current_info["force_rep"] = avg_force_rep
         current_info["force_flee"] = avg_force_flee
+
+        is_nan_pos = []
+        for i in range(n):
+            if math.isnan(pos_x_host[i]):
+                is_nan_pos.append(i)
+        if is_nan_pos:
+            print(f'Animals with NaN value: {is_nan_pos}')
+
 
         screen.fill((30, 30, 30))
         if SHOW_FORCE_FIELDS:
@@ -700,7 +761,7 @@ def run_tkinter():
 
     # Zweite y-Achse für die Nettokraft
     ax2 = ax1.twinx()
-    ax2.set_ylabel("Durchschnittliche Nettokraft", color="blue")
+    ax2.set_ylabel("Durchschnittliche Kraft", color="black")
     ax2.set_ylim(0, MAX_FORCE * 1.5)
     (line2,) = ax2.plot([], [], "b-", label="Kraft (gesamt)")
     (line3,) = ax2.plot([], [], "g-", label="Zufallskraft")
